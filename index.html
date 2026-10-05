@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CityU Nav Prototype - YEUNG</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, "Microsoft JhengHei", sans-serif; }
+  #panel { position: absolute; top: 12px; left: 12px; width: 320px; max-height: calc(100vh - 24px); overflow: auto;
+    background: rgba(255,255,255,.94); border-radius: 10px; padding: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.15); box-sizing: border-box; }
+  h1 { font-size: 16px; margin: 0 0 6px; }
+  .warn { font-size: 12px; color: #b45309; background: #fef3c7; padding: 6px 8px; border-radius: 6px; margin: 0 0 10px; }
+  label { display: block; font-size: 13px; margin-bottom: 8px; }
+  label input { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 6px 8px;
+    font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }
+  button { cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  #go { width: 100%; background: #c8102e; color: #fff; border: none; padding: 8px; font-size: 14px; }
+  #msg { font-size: 13px; margin: 8px 0 4px; color: #444; }
+  #msg.error { color: #c00; }
+  #steps { font-size: 13px; padding-left: 20px; margin: 4px 0 10px; }
+  #steps li { margin-bottom: 4px; }
+  #floors { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  #floors button.active { background: #1f2937; color: #fff; border-color: #1f2937; }
+  .hint { font-size: 12px; color: #666; margin: 10px 0 0; }
+  @media (max-width: 600px) {
+    #panel { top: auto; bottom: 0; left: 0; width: 100%; max-height: 45vh; border-radius: 10px 10px 0 0; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="panel">
+  <h1>CityU 導航原型 · YEUNG + BOC</h1>
+  <p class="warn">佈局係按 CampusDirectory.pdf（2026-09-07 版）嘅示意圖人手估計，唔係按比例。部門只定位到「樓層＋升降機」，走廊路線係假設。</p>
+  <label>起點 <input id="from" list="places" placeholder="例如 Concourse 或 L9 @ 6/F" autocomplete="off"></label>
+  <label>目的地 <input id="to" list="places" placeholder="例如 CS 或 Department of ..." autocomplete="off"></label>
+  <button id="go">搵路</button>
+  <div id="msg"></div>
+  <ol id="steps"></ol>
+  <div>樓層：</div>
+  <div id="floors"></div>
+  <p class="hint">可以輸入部門簡稱（例如 CS、MNE）。撳 3D 入面嘅升降機或標籤，會填入你最後撳過嘅輸入框。</p>
+</div>
+<datalist id="places"></datalist>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Positions are hand-estimated from the CampusDirectory.pdf schematic, not surveyed.
+const FLOOR_H = 5;
+const ALL_FLOORS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const YEUNG_FLOORS = [1, 2, 3, 4, 5, 6, 7];
+const WING_FLOORS = [4, 5, 6, 7, 8, 9];
+const CONCOURSE_FLOOR = 4;
+const LIFT_WAIT = 15;
+const floorY = f => (f - 1) * FLOOR_H;
+
+const ZONES = [
+  { key: 'P', name: '紫區', color: 0x9b6fc4, x0: -120, x1: -80 },
+  { key: 'G', name: '綠區', color: 0x4caf50, x0: -80, x1: -40 },
+  { key: 'B', name: '藍區', color: 0x3fa9f5, x0: -40, x1: 0 },
+  { key: 'Y', name: '黃區', color: 0xf5b942, x0: 0, x1: 40 },
+  { key: 'R', name: 'BOC', color: 0xe8452c, x0: 40, x1: 80 },
+];
+const zoneAt = x => ZONES.find(z => x < z.x1) ?? ZONES.at(-1);
+
+const WING_START = { x: 80, z: -12 };
+const WING_END = { x: 118, z: -40 };
+const TOP_X = [-76, -48, -20, 8, 36];
+const LIFTS = [
+  { id: 'L16', x: -118, z: -30, floors: YEUNG_FLOORS },
+  { id: 'L17', x: -88, z: -40, floors: YEUNG_FLOORS },
+  ...TOP_X.map((x, i) => ({ id: `L${i + 1}`, x, z: -10, floors: YEUNG_FLOORS })),
+  ...TOP_X.map((x, i) => ({ id: `L${i + 6}`, x, z: 10, floors: YEUNG_FLOORS })),
+  { id: 'L13', x: 58, z: -12, floors: YEUNG_FLOORS },
+  { id: 'L19/L20', x: WING_END.x, z: WING_END.z, floors: WING_FLOORS },
+];
+const SPINE_X = [-100, ...TOP_X, 58, 78];
+
+const BUILDINGS = {
+  YEUNG: 'Yeung Kin Man Academic Building', BOC: 'Bank of China (Hong Kong) Complex',
+  LAU: 'Lau Ming Wai Academic Building', LI: 'Li Dak Sum Yip Yio Chin Academic Building',
+  JCT: 'Jockey Club One Health Tower', CMC: 'Run Run Shaw Creative Media Centre',
+  CIC: 'CityUHK International Centre', TYB: 'To Yuen Building',
+};
+// [code, name, building, floor, lift] from the PDF's Academic Units table
+const UNITS = [
+  ['CBM', 'College of Biomedicine', 'BOC', 6, 'L13'],
+  [null, 'College of Computing', 'YEUNG', 6, 'L6'],
+  ['CENG', 'College of Engineering', 'YEUNG', 6, 'L8'],
+  ['CSCI', 'College of Science', 'YEUNG', 5, 'L7'],
+  ['ACE', 'Department of Architecture and Civil Engineering', 'YEUNG', 6, 'L8'],
+  ['BME', 'Department of Biomedical Engineering', 'YEUNG', 6, 'L4'],
+  ['BIOS', 'Department of Biostatistics', 'YEUNG', 5, 'L1'],
+  ['CHEM', 'Department of Chemistry', 'YEUNG', 5, 'L6'],
+  ['CS', 'Department of Computer Science', 'YEUNG', 6, 'L9'],
+  ['EE', 'Department of Electrical Engineering', 'YEUNG', 6, 'L7'],
+  ['MSE', 'Department of Materials Science and Engineering', 'BOC', 7, 'L13'],
+  ['MA', 'Department of Mathematics', 'YEUNG', 5, 'L9'],
+  ['MNE', 'Department of Mechanical Engineering', 'YEUNG', 6, 'L2'],
+  ['PHY', 'Department of Physics', 'YEUNG', 5, 'L7'],
+  ['SYE', 'Department of Systems Engineering', 'YEUNG', 6, 'L1'],
+  ['SEE', 'School of Energy and Environment', 'YEUNG', 6, 'L2'],
+  ['LC', 'Chan Feng Men-ling Chan Shuk-lin Language Centre', 'LI', 2],
+  ['SGS', 'Chow Yei Ching School of Graduate Studies', 'CIC', 2],
+  ['CB', 'College of Business', 'LAU', 12],
+  ['CLASS', 'College of Liberal Arts and Social Sciences', 'LI', 6],
+  ['AC', 'Department of Accountancy', 'LAU', 13],
+  ['BMS', 'Department of Biomedical Sciences', 'TYB', 1],
+  ['CAH', 'Department of Chinese and History', 'LI', 4],
+  ['DS', 'Department of Data Science', 'LAU', 16],
+  ['DAO', 'Department of Decision Analytics and Operations', 'LAU', 7],
+  ['EF', 'Department of Economics and Finance', 'LAU', 9],
+  ['EN', 'Department of English', 'CMC', 8],
+  ['PH', 'Department of Infectious Diseases and Public Health', 'TYB', 5],
+  ['IS', 'Department of Information Systems', 'LAU', 6],
+  ['LT', 'Department of Linguistics and Translation', 'LI', 5],
+  ['MGT', 'Department of Management', 'LAU', 11],
+  ['MKT', 'Department of Marketing', 'LAU', 10],
+  ['COM', 'Department of Media and Communication', 'CMC', 5],
+  ['NS', 'Department of Neuroscience', 'TYB', 5],
+  ['PIA', 'Department of Public and International Affairs', 'LI', 5],
+  ['SS', 'Department of Social and Behavioural Sciences', 'LI', 5],
+  ['VCS', 'Department of Veterinary Clinical Sciences', 'JCT', 9],
+  ['JCC', 'Jockey Club College of Veterinary Medicine and Life Sciences', 'JCT', 10],
+  ['SCOPE', 'School of Continuing and Professional Education', 'LI', 2],
+  ['SCM', 'School of Creative Media', 'CMC', 7],
+  ['SLW', 'School of Law', 'LI', 6],
+];
+const INSIDE = new Set(['YEUNG', 'BOC']);
+
+// ---------- Navigation graph ----------
+const nodes = new Map();
+const adj = new Map();
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+function addNode(n) { nodes.set(n.id, n); adj.set(n.id, []); return n; }
+function link(a, b, kind = 'walk', cost) {
+  const c = cost ?? dist(nodes.get(a), nodes.get(b));
+  adj.get(a).push({ to: b, kind, cost: c });
+  adj.get(b).push({ to: a, kind, cost: c });
+}
+
+for (const f of YEUNG_FLOORS) {
+  SPINE_X.forEach((x, i) => {
+    const where = f === CONCOURSE_FLOOR ? 'Herman Hu Concourse' : `${f}/F 走廊`;
+    addNode({ id: `${f}-s${i}`, x, y: floorY(f), z: 0, floor: f, label: `${where}（${zoneAt(x).name}）` });
+    if (i) link(`${f}-s${i - 1}`, `${f}-s${i}`);
+  });
+}
+const lastSpine = `s${SPINE_X.length - 1}`;
+for (const f of WING_FLOORS.filter(f => f <= 7)) {
+  addNode({ id: `${f}-w0`, ...WING_START, y: floorY(f), floor: f, label: `${f}/F BOC 東翼` });
+  link(`${f}-w0`, `${f}-${lastSpine}`);
+}
+const nearestSpine = x => SPINE_X.reduce((best, sx, i) => Math.abs(sx - x) < Math.abs(SPINE_X[best] - x) ? i : best, 0);
+for (const lift of LIFTS) {
+  lift.floors.forEach((f, k) => {
+    const id = `${f}-${lift.id}`;
+    const base = { x: lift.x, y: floorY(f), z: lift.z, floor: f, lift: lift.id };
+    addNode({ ...base, id, label: `${f}/F ${lift.id} 升降機大堂` });
+    addNode({ ...base, id: `${id}-car`, label: `${lift.id} 升降機` });
+    link(id, `${id}-car`, 'liftwait', LIFT_WAIT);
+    if (lift.id === 'L19/L20') { if (nodes.has(`${f}-w0`)) link(id, `${f}-w0`); }
+    else link(id, `${f}-s${nearestSpine(lift.x)}`);
+    if (k) link(`${lift.floors[k - 1]}-${lift.id}-car`, `${id}-car`, 'lift', FLOOR_H);
+  });
+}
+addNode({ id: 'exit-east', x: 90, y: floorY(CONCOURSE_FLOOR), z: 16, floor: CONCOURSE_FLOOR, label: '4/F 東南出口（往 JCT / LAU / LI / CMC / CIC）' });
+addNode({ id: 'exit-west', x: -132, y: floorY(CONCOURSE_FLOOR), z: -30, floor: CONCOURSE_FLOOR, label: '4/F 西面出口（往 To Yuen Building）' });
+link('exit-east', `${CONCOURSE_FLOOR}-${lastSpine}`);
+link('exit-west', `${CONCOURSE_FLOOR}-L16`);
+
+// ---------- Places ----------
+const places = new Map();
+const aliases = new Map();
+const placeList = [];
+function addPlace(display, info, ...keys) {
+  places.set(display.toUpperCase(), info);
+  for (const k of keys) aliases.set(k.toUpperCase(), info);
+  placeList.push(display);
+}
+addPlace('Herman Hu Concourse (4/F)', { node: `${CONCOURSE_FLOOR}-s3` }, 'Concourse');
+const unitsAtLobby = new Map();
+for (const [code, name, bld, floor, lift] of UNITS) {
+  const inside = INSIDE.has(bld);
+  const node = inside ? `${floor}-${lift}` : bld === 'TYB' ? 'exit-west' : 'exit-east';
+  addPlace(code ? `${code} - ${name}` : name, { node, unit: { code, name, bld, floor, lift } }, ...(code ? [code] : []));
+  if (inside) {
+    if (!unitsAtLobby.has(node)) unitsAtLobby.set(node, []);
+    unitsAtLobby.get(node).push(code ?? 'Computing');
+  }
+}
+for (const lift of LIFTS) for (const f of lift.floors) addPlace(`${lift.id} @ ${f}/F`, { node: `${f}-${lift.id}` }, `${f}/F ${lift.id}`);
+const lookup = s => { const k = s.trim().toUpperCase(); return places.get(k) ?? aliases.get(k); };
+
+// ---------- A* ----------
+function findPath(startId, goalId) {
+  const goal = nodes.get(goalId);
+  const g = new Map([[startId, 0]]);
+  const fScore = new Map([[startId, dist(nodes.get(startId), goal)]]);
+  const came = new Map();
+  const open = new Set([startId]);
+  while (open.size) {
+    let cur = null, best = Infinity;
+    for (const id of open) { const v = fScore.get(id); if (v < best) { best = v; cur = id; } }
+    if (cur === goalId) {
+      const seq = [];
+      let id = goalId;
+      while (id !== startId) { const c = came.get(id); seq.unshift({ id, via: c.kind }); id = c.from; }
+      seq.unshift({ id: startId, via: null });
+      return { seq, cost: g.get(goalId) };
+    }
+    open.delete(cur);
+    for (const e of adj.get(cur)) {
+      const ng = g.get(cur) + e.cost;
+      if (ng < (g.get(e.to) ?? Infinity)) {
+        came.set(e.to, { from: cur, kind: e.kind });
+        g.set(e.to, ng);
+        fScore.set(e.to, ng + dist(nodes.get(e.to), goal));
+        open.add(e.to);
+      }
+    }
+  }
+  return null;
+}
+
+function buildSteps(seq) {
+  const steps = [];
+  let i = 1;
+  while (i < seq.length) {
+    const isLift = seq[i].via !== 'walk';
+    const a = nodes.get(seq[i - 1].id);
+    let j = i;
+    while (j < seq.length && (seq[j].via !== 'walk') === isLift) j++;
+    const b = nodes.get(seq[j - 1].id);
+    if (isLift) {
+      if (a.floor !== b.floor) steps.push(`乘 ${b.lift} 升降機：${a.floor}/F → ${b.floor}/F`);
+    } else {
+      const dx = b.x - a.x;
+      const dir = Math.abs(dx) < 6 ? '' : dx > 0 ? '向 BOC 方向' : '向紫區方向';
+      steps.push(`${dir}行到 ${b.label}`);
+    }
+    i = j;
+  }
+  return steps;
+}
+
+// ---------- Scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdfe6ee);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 3000);
+camera.position.set(150, 140, 200);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(-10, 15, 0);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(100, 200, 80);
+scene.add(sun);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), new THREE.MeshLambertMaterial({ color: 0xc8d2c0 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.6;
+scene.add(ground);
+
+function makeLabel(text, size, bg = 'rgba(255,255,255,0.85)') {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const font = 'bold 48px system-ui, "Microsoft JhengHei", sans-serif';
+  ctx.font = font;
+  canvas.width = Math.ceil(ctx.measureText(text).width) + 24;
+  canvas.height = 68;
+  ctx.font = font;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#222';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 12, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sprite.scale.set(size * canvas.width / canvas.height, size, 1);
+  sprite.renderOrder = 500;
+  return sprite;
+}
+
+const floorGroups = new Map();
+const pickables = [];
+const liftGeo = new THREE.BoxGeometry(3, 2.8, 3);
+
+for (const f of ALL_FLOORS) {
+  const group = new THREE.Group();
+  group.position.y = floorY(f);
+  const materials = [];
+  const slab = (w, d, x, z, color, { rotY = 0, h = 0.4, y = -0.2, opacity = 0.85 } = {}) => {
+    const m = new THREE.MeshLambertMaterial({ color, transparent: true, opacity });
+    m.userData.base = opacity;
+    materials.push(m);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = rotY;
+    group.add(mesh);
+    return mesh;
+  };
+
+  if (f <= 7) {
+    for (const zn of ZONES) {
+      const cx = (zn.x0 + zn.x1) / 2, w = zn.x1 - zn.x0;
+      if (zn.key === 'P') slab(w, 90, cx, 0, zn.color);
+      else if (zn.key === 'R') slab(w, 36, cx, 0, zn.color);
+      else {
+        slab(w, 24, cx, 0, zn.color);
+        slab(24, 26, cx, -25, zn.color);
+        slab(24, 26, cx, 25, zn.color);
+      }
+    }
+    slab(190, f === CONCOURSE_FLOOR ? 10 : 4, -15, 0, 0xffffff, { h: 0.05, y: 0.03, opacity: 0.95 });
+  }
+  if (WING_FLOORS.includes(f)) {
+    const dx = WING_END.x - WING_START.x, dz = WING_END.z - WING_START.z;
+    slab(Math.hypot(dx, dz) + 10, 14, (WING_START.x + WING_END.x) / 2, (WING_START.z + WING_END.z) / 2,
+      0xe8452c, { rotY: Math.atan2(-dz, dx) });
+  }
+  if (f === CONCOURSE_FLOOR) {
+    for (const [name, x] of [['MMW', -76], ['FYW', -44], ['YKC', -12], ['CYC', 20]]) {
+      slab(15, 15, x, 62, 0xbbbbbb, { rotY: Math.PI / 4, opacity: 0.6 });
+      const l = makeLabel(name, 2.5);
+      l.position.set(x, 3, 62);
+      group.add(l);
+    }
+    for (const [id, text] of [['exit-east', '往 JCT / LAU / LI'], ['exit-west', '往 To Yuen']]) {
+      const n = nodes.get(id);
+      slab(5, 5, n.x, n.z, 0x16a34a, { h: 1, y: 0.5, opacity: 0.9 });
+      const l = makeLabel(text, 2.5);
+      l.position.set(n.x, 4, n.z);
+      group.add(l);
+    }
+    const c = makeLabel('Herman Hu Concourse', 3);
+    c.position.set(-20, 6, 0);
+    group.add(c);
+  }
+
+  const labels = new THREE.Group();
+  labels.visible = false;
+  for (const lift of LIFTS.filter(l => l.floors.includes(f))) {
+    const place = `${lift.id} @ ${f}/F`;
+    const m = new THREE.MeshLambertMaterial({ color: 0x444444, transparent: true, opacity: 0.9 });
+    m.userData.base = 0.9;
+    materials.push(m);
+    const box = new THREE.Mesh(liftGeo, m);
+    box.position.set(lift.x, 1.4, lift.z);
+    box.userData.place = place;
+    group.add(box);
+    pickables.push(box);
+
+    const units = unitsAtLobby.get(`${f}-${lift.id}`);
+    const lbl = units
+      ? makeLabel(`${lift.id} · ${units.join(' / ')}`, 2.6, 'rgba(255,240,180,0.95)')
+      : makeLabel(lift.id, 1.8);
+    lbl.position.set(lift.x, 4.5, lift.z);
+    lbl.userData.place = place;
+    labels.add(lbl);
+    pickables.push(lbl);
+  }
+  group.add(labels);
+
+  const fl = makeLabel(f <= 7 ? `YEUNG / BOC ${f}/F` : `BOC ${f}/F`, 3.5);
+  fl.position.set(-150, 1, 0);
+  group.add(fl);
+
+  scene.add(group);
+  floorGroups.set(f, { group, materials, labels });
+}
+
+const shaftMat = new THREE.MeshLambertMaterial({ color: 0x555555, transparent: true, opacity: 0.35 });
+for (const lift of LIFTS) {
+  const lo = floorY(lift.floors[0]), hi = floorY(lift.floors.at(-1)) + 3;
+  const shaft = new THREE.Mesh(new THREE.BoxGeometry(1.5, hi - lo, 1.5), shaftMat);
+  shaft.position.set(lift.x, (lo + hi) / 2, lift.z);
+  scene.add(shaft);
+}
+
+// ---------- Route rendering ----------
+const pathMat = new THREE.MeshBasicMaterial({ color: 0xff3b30, depthTest: false, transparent: true, opacity: 0.9 });
+const marker = new THREE.Mesh(new THREE.SphereGeometry(1.2, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }));
+marker.renderOrder = 1001;
+marker.visible = false;
+scene.add(marker);
+const pinGeo = new THREE.ConeGeometry(1.5, 4, 16);
+pinGeo.rotateX(Math.PI);
+const startPin = new THREE.Mesh(pinGeo, new THREE.MeshBasicMaterial({ color: 0x16a34a, depthTest: false }));
+const endPin = new THREE.Mesh(pinGeo, new THREE.MeshBasicMaterial({ color: 0xc8102e, depthTest: false }));
+for (const p of [startPin, endPin]) { p.renderOrder = 1000; p.visible = false; scene.add(p); }
+
+let pathMesh = null, curve = null;
+function drawPath(seq) {
+  if (pathMesh) { scene.remove(pathMesh); pathMesh.geometry.dispose(); }
+  curve = new THREE.CurvePath();
+  let prev = null;
+  for (const s of seq) {
+    const n = nodes.get(s.id);
+    const p = new THREE.Vector3(n.x, n.y + 1.2, n.z);
+    if (prev && !p.equals(prev)) curve.add(new THREE.LineCurve3(prev, p));
+    prev = p;
+  }
+  pathMesh = new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(64, curve.curves.length * 8), 0.5, 8, false), pathMat);
+  pathMesh.renderOrder = 999;
+  scene.add(pathMesh);
+  const a = nodes.get(seq[0].id), b = nodes.get(seq.at(-1).id);
+  startPin.position.set(a.x, a.y + 5, a.z);
+  endPin.position.set(b.x, b.y + 5, b.z);
+  startPin.visible = endPin.visible = marker.visible = true;
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+const fromInput = $('from'), toInput = $('to'), msg = $('msg'), stepsEl = $('steps');
+
+for (const name of placeList) {
+  const opt = document.createElement('option');
+  opt.value = name;
+  $('places').appendChild(opt);
+}
+
+function showMessage(text, isError = false) {
+  msg.textContent = text;
+  msg.className = isError ? 'error' : '';
+}
+
+function route() {
+  const from = lookup(fromInput.value), to = lookup(toInput.value);
+  stepsEl.replaceChildren();
+  if (!from || !to) return showMessage('搵唔到起點或目的地，請喺清單揀。', true);
+  if (from.node === to.node) return showMessage('起點同目的地喺同一個位置。', true);
+  const result = findPath(from.node, to.node);
+  if (!result) return showMessage('搵唔到路線。', true);
+
+  const steps = buildSteps(result.seq);
+  const u = to.unit;
+  if (u && !INSIDE.has(u.bld)) {
+    steps.push(`出 YEUNG 後前往 ${BUILDINGS[u.bld]} ${u.floor}/F（其他大樓路段未建模）`);
+    showMessage(`${u.name} 喺 ${u.bld} ${u.floor}/F。PDF 建議經 4/F Herman Hu Concourse 前往其他大樓。`);
+  } else if (u) {
+    showMessage(`${u.name}：${u.bld} ${u.floor}/F，近 ${u.lift} 升降機`);
+  } else {
+    showMessage('');
+  }
+  for (const s of steps) {
+    const li = document.createElement('li');
+    li.textContent = s;
+    stepsEl.appendChild(li);
+  }
+  drawPath(result.seq);
+  setFocus(nodes.get(to.node).floor);
+}
+
+$('go').addEventListener('click', route);
+for (const el of [fromInput, toInput]) el.addEventListener('keydown', e => { if (e.key === 'Enter') route(); });
+
+const floorButtons = new Map();
+function setFocus(f) {
+  for (const [fl, fg] of floorGroups) {
+    fg.group.visible = f === null || fl <= f;
+    const dim = f !== null && fl < f;
+    for (const m of fg.materials) m.opacity = m.userData.base * (dim ? 0.15 : 1);
+    fg.labels.visible = fl === f;
+  }
+  for (const [key, btn] of floorButtons) btn.classList.toggle('active', key === f);
+  controls.target.set(-10, f === null ? 15 : floorY(f), 0);
+}
+for (const f of [null, ...ALL_FLOORS]) {
+  const btn = document.createElement('button');
+  btn.textContent = f === null ? '全部' : `${f}/F`;
+  btn.addEventListener('click', () => setFocus(f));
+  $('floors').appendChild(btn);
+  floorButtons.set(f, btn);
+}
+
+let pickTarget = toInput;
+fromInput.addEventListener('focus', () => { pickTarget = fromInput; });
+toInput.addEventListener('focus', () => { pickTarget = toInput; });
+
+const isShown = obj => { for (let o = obj; o; o = o.parent) if (!o.visible) return false; return true; };
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let downPos = null;
+renderer.domElement.addEventListener('pointerdown', e => { downPos = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!downPos || Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]) > 5) return;
+  pointer.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(pickables.filter(isShown), false)[0];
+  if (!hit) return;
+  pickTarget.value = hit.object.userData.place;
+  if (fromInput.value && toInput.value) route();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  if (curve && curve.curves.length) {
+    const t = (clock.getElapsedTime() * 20 / curve.getLength()) % 1;
+    marker.position.copy(curve.getPointAt(t));
+  }
+  renderer.render(scene, camera);
+});
+
+setFocus(null);
+fromInput.value = 'Herman Hu Concourse (4/F)';
+toInput.value = 'CS - Department of Computer Science';
+route();
+</script>
+</body>
+</html>
