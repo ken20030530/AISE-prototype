@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CityU Nav Prototype - YEUNG</title>
+<title>CityU Nav Prototype</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, "Microsoft JhengHei", sans-serif; }
   #panel { position: absolute; top: 12px; left: 12px; width: 320px; max-height: calc(100vh - 24px); overflow: auto;
@@ -11,7 +11,7 @@
   h1 { font-size: 16px; margin: 0 0 6px; }
   .warn { font-size: 12px; color: #b45309; background: #fef3c7; padding: 6px 8px; border-radius: 6px; margin: 0 0 10px; }
   label { display: block; font-size: 13px; margin-bottom: 8px; }
-  label input { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 6px 8px;
+  label input, label select { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 6px 8px;
     font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }
   button { cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
   #go { width: 100%; background: #c8102e; color: #fff; border: none; padding: 8px; font-size: 14px; }
@@ -37,16 +37,17 @@
 </head>
 <body>
 <div id="panel">
-  <h1>CityU 導航原型 · YEUNG + BOC</h1>
-  <p class="warn">佈局係按 CampusDirectory.pdf（2026-09-07 版）嘅示意圖人手估計，唔係按比例。部門只定位到「樓層＋升降機」，走廊路線係假設。</p>
-  <label>起點 <input id="from" list="places" placeholder="例如 Concourse 或 L9 @ 6/F" autocomplete="off"></label>
-  <label>目的地 <input id="to" list="places" placeholder="例如 CS 或 Department of ..." autocomplete="off"></label>
+  <h1>CityU 導航原型</h1>
+  <p class="warn">YEUNG / BOC 按 CampusDirectory.pdf（2026-09-07 版）示意圖估計；LAU、LI、JCT、CMC、CIC 用 Location Plan 外形逐層疊起，每層只有一個升降機大堂。大樓之間嘅天橋／扶手電梯按 PDF 標示估位置。全部唔係按比例。</p>
+  <label>起點 <input id="from" list="places" placeholder="例如 Concourse 或 LAU 3/F" autocomplete="off"></label>
+  <label>目的地 <input id="to" list="places" placeholder="例如 CB、CS、SCM" autocomplete="off"></label>
   <button id="go">搵路</button>
   <div id="msg"></div>
   <ol id="steps"></ol>
-  <div>樓層：</div>
+  <label>樓層間距 <input type="range" id="gap" min="5" max="25" value="12"></label>
+  <label>大樓 <select id="bld"></select></label>
   <div id="floors"></div>
-  <p class="hint">可以輸入部門簡稱（例如 CS、MNE）。撳 3D 入面嘅升降機或標籤，會填入你最後撳過嘅輸入框。</p>
+  <p class="hint">可以輸入部門簡稱（例如 CS、CB、SCM）。撳 3D 入面嘅升降機或標籤，會填入你最後撳過嘅輸入框。</p>
 </div>
 <datalist id="places"></datalist>
 
@@ -54,15 +55,21 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// Positions are hand-estimated from the CampusDirectory.pdf schematic, not surveyed.
+// All positions are hand-estimated from CampusDirectory.pdf schematics, not surveyed.
 const FLOOR_H = 5;
-const ALL_FLOORS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const LIFT_WAIT = 15;
+let floorGap = 12;
+const dispY = lvl => lvl * floorGap;
+const flName = fl => /^\d/.test(fl) ? `${fl}/F` : fl === 'G' ? 'G/F' : fl;
+
+// Pixels on the PDF Location Plan screenshot -> world metres
+const PX = 0.8;
+const toWorld = (ix, iy) => [(ix - 440) * PX + 40, (iy - 440) * PX];
+
+// ---------- YEUNG / BOC ----------
 const YEUNG_FLOORS = [1, 2, 3, 4, 5, 6, 7];
 const WING_FLOORS = [4, 5, 6, 7, 8, 9];
 const CONCOURSE_FLOOR = 4;
-const LIFT_WAIT = 15;
-const floorY = f => (f - 1) * FLOOR_H;
-
 const ZONES = [
   { key: 'P', name: '紫區', color: 0x9b6fc4, x0: -120, x1: -80 },
   { key: 'G', name: '綠區', color: 0x4caf50, x0: -80, x1: -40 },
@@ -71,11 +78,10 @@ const ZONES = [
   { key: 'R', name: 'BOC', color: 0xe8452c, x0: 40, x1: 80 },
 ];
 const zoneAt = x => ZONES.find(z => x < z.x1) ?? ZONES.at(-1);
-
 const WING_START = { x: 80, z: -12 };
 const WING_END = { x: 118, z: -40 };
 const TOP_X = [-76, -48, -20, 8, 36];
-const LIFTS = [
+const YEUNG_LIFTS = [
   { id: 'L16', x: -118, z: -30, floors: YEUNG_FLOORS },
   { id: 'L17', x: -88, z: -40, floors: YEUNG_FLOORS },
   ...TOP_X.map((x, i) => ({ id: `L${i + 1}`, x, z: -10, floors: YEUNG_FLOORS })),
@@ -83,13 +89,29 @@ const LIFTS = [
   { id: 'L13', x: 58, z: -12, floors: YEUNG_FLOORS },
   { id: 'L19/L20', x: WING_END.x, z: WING_END.z, floors: WING_FLOORS },
 ];
+const BOC_LIFTS = new Set(['L13', 'L19/L20']);
 const SPINE_X = [-100, ...TOP_X, 58, 78];
 
-const BUILDINGS = {
+// ---------- Other buildings (footprints traced from Location Plan pixels) ----------
+const nums = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => String(a + i));
+const LAU_PODIUM = [[498, 522], [600, 530], [720, 553], [716, 576], [600, 566], [495, 560]];
+const LAU_TOWER = [[662, 545], [716, 555], [712, 578], [658, 570]];
+const TOWERS = {
+  LAU: { name: 'Lau Ming Wai Academic Building', color: 0xd9a066, floors: ['G', ...nums(1, 19)], core: [690, 562],
+    footprint: fl => Number(fl) >= 9 ? LAU_TOWER : LAU_PODIUM },
+  LI: { name: 'Li Dak Sum Yip Yio Chin Academic Building', color: 0xc39bd3, floors: ['LG2', 'LG1', 'G', ...nums(1, 6)], core: [598, 470],
+    footprint: () => [[565, 525], [610, 522], [632, 470], [646, 395], [622, 380], [602, 396], [588, 460], [566, 495]] },
+  JCT: { name: 'Jockey Club One Health Tower', color: 0x7fb3d5, floors: ['B2', 'B1', 'G', '1&2', ...nums(3, 14)], core: [535, 490],
+    footprint: () => [[508, 445], [562, 445], [562, 520], [508, 520]] },
+  CMC: { name: 'Run Run Shaw Creative Media Centre', color: 0x76d7c4, floors: nums(1, 9), core: [1020, 456],
+    footprint: () => [[983, 442], [1035, 420], [1062, 470], [1002, 497]] },
+  CIC: { name: 'CityUHK International Centre', color: 0xf0b27a, floors: ['G', ...nums(1, 4)], core: [800, 628],
+    footprint: () => [[768, 606], [818, 598], [836, 642], [790, 662]] },
+};
+
+const BUILDING_NAMES = {
   YEUNG: 'Yeung Kin Man Academic Building', BOC: 'Bank of China (Hong Kong) Complex',
-  LAU: 'Lau Ming Wai Academic Building', LI: 'Li Dak Sum Yip Yio Chin Academic Building',
-  JCT: 'Jockey Club One Health Tower', CMC: 'Run Run Shaw Creative Media Centre',
-  CIC: 'CityUHK International Centre', TYB: 'To Yuen Building',
+  TYB: 'To Yuen Building', ...Object.fromEntries(Object.entries(TOWERS).map(([k, b]) => [k, b.name])),
 };
 // [code, name, building, floor, lift] from the PDF's Academic Units table
 const UNITS = [
@@ -135,48 +157,90 @@ const UNITS = [
   ['SCM', 'School of Creative Media', 'CMC', 7],
   ['SLW', 'School of Law', 'LI', 6],
 ];
-const INSIDE = new Set(['YEUNG', 'BOC']);
 
 // ---------- Navigation graph ----------
 const nodes = new Map();
 const adj = new Map();
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-function addNode(n) { nodes.set(n.id, n); adj.set(n.id, []); return n; }
+function addNode(n) { n.y = n.lvl * FLOOR_H; nodes.set(n.id, n); adj.set(n.id, []); return n; }
 function link(a, b, kind = 'walk', cost) {
   const c = cost ?? dist(nodes.get(a), nodes.get(b));
   adj.get(a).push({ to: b, kind, cost: c });
   adj.get(b).push({ to: a, kind, cost: c });
 }
+const yNode = (id, x, z, f, label, extra = {}) =>
+  addNode({ id, x, z, lvl: f - 1, bld: 'YEUNG', fl: String(f), label, ...extra });
 
 for (const f of YEUNG_FLOORS) {
   SPINE_X.forEach((x, i) => {
-    const where = f === CONCOURSE_FLOOR ? 'Herman Hu Concourse' : `${f}/F 走廊`;
-    addNode({ id: `${f}-s${i}`, x, y: floorY(f), z: 0, floor: f, label: `${where}（${zoneAt(x).name}）` });
+    const where = f === CONCOURSE_FLOOR ? 'Herman Hu Concourse' : `YEUNG ${f}/F 走廊`;
+    yNode(`${f}-s${i}`, x, 0, f, `${where}（${zoneAt(x).name}）`);
     if (i) link(`${f}-s${i - 1}`, `${f}-s${i}`);
   });
 }
 const lastSpine = `s${SPINE_X.length - 1}`;
 for (const f of WING_FLOORS.filter(f => f <= 7)) {
-  addNode({ id: `${f}-w0`, ...WING_START, y: floorY(f), floor: f, label: `${f}/F BOC 東翼` });
+  yNode(`${f}-w0`, WING_START.x, WING_START.z, f, `BOC ${f}/F 東翼`);
   link(`${f}-w0`, `${f}-${lastSpine}`);
 }
 const nearestSpine = x => SPINE_X.reduce((best, sx, i) => Math.abs(sx - x) < Math.abs(SPINE_X[best] - x) ? i : best, 0);
-for (const lift of LIFTS) {
+for (const lift of YEUNG_LIFTS) {
+  const where = BOC_LIFTS.has(lift.id) ? 'BOC' : 'YEUNG';
   lift.floors.forEach((f, k) => {
     const id = `${f}-${lift.id}`;
-    const base = { x: lift.x, y: floorY(f), z: lift.z, floor: f, lift: lift.id };
-    addNode({ ...base, id, label: `${f}/F ${lift.id} 升降機大堂` });
-    addNode({ ...base, id: `${id}-car`, label: `${lift.id} 升降機` });
+    yNode(id, lift.x, lift.z, f, `${where} ${f}/F ${lift.id} 升降機大堂`, { lift: lift.id });
+    yNode(`${id}-car`, lift.x, lift.z, f, `${lift.id} 升降機`, { lift: lift.id });
     link(id, `${id}-car`, 'liftwait', LIFT_WAIT);
     if (lift.id === 'L19/L20') { if (nodes.has(`${f}-w0`)) link(id, `${f}-w0`); }
     else link(id, `${f}-s${nearestSpine(lift.x)}`);
     if (k) link(`${lift.floors[k - 1]}-${lift.id}-car`, `${id}-car`, 'lift', FLOOR_H);
   });
 }
-addNode({ id: 'exit-east', x: 90, y: floorY(CONCOURSE_FLOOR), z: 16, floor: CONCOURSE_FLOOR, label: '4/F 東南出口（往 JCT / LAU / LI / CMC / CIC）' });
-addNode({ id: 'exit-west', x: -132, y: floorY(CONCOURSE_FLOOR), z: -30, floor: CONCOURSE_FLOOR, label: '4/F 西面出口（往 To Yuen Building）' });
+yNode('exit-east', 90, 16, CONCOURSE_FLOOR, 'YEUNG 4/F 東南出口', { door: true });
+yNode('exit-west', -132, -30, CONCOURSE_FLOOR, 'YEUNG 4/F 西面出口（往 To Yuen Building）', { door: true });
 link('exit-east', `${CONCOURSE_FLOOR}-${lastSpine}`);
 link('exit-west', `${CONCOURSE_FLOOR}-L16`);
+
+for (const [key, b] of Object.entries(TOWERS)) {
+  const [x, z] = toWorld(...b.core);
+  b.floors.forEach((fl, i) => {
+    const hall = `${key}|${fl}|hall`;
+    addNode({ id: hall, x, z, lvl: i, bld: key, fl, label: `${key} ${flName(fl)} 升降機大堂`, lift: key });
+    addNode({ id: `${key}|${fl}|car`, x, z, lvl: i, bld: key, fl, label: `${key} 升降機`, lift: key });
+    link(hall, `${key}|${fl}|car`, 'liftwait', LIFT_WAIT);
+    if (i) link(`${key}|${b.floors[i - 1]}|car`, `${key}|${fl}|car`, 'lift', FLOOR_H);
+  });
+}
+function door(bld, fl, px, label) {
+  const id = `${bld}|${fl}|${px.join(',')}`;
+  const [x, z] = toWorld(...px);
+  addNode({ id, x, z, lvl: TOWERS[bld].floors.indexOf(fl), bld, fl, label, door: true });
+  link(id, `${bld}|${fl}|hall`);
+  return id;
+}
+function outdoor(id, px, lvl, label) {
+  const [x, z] = toWorld(...px);
+  addNode({ id, x, z, lvl, bld: null, fl: null, label });
+  return id;
+}
+
+// Inter-building links as marked in the PDF
+outdoor('ucircle', [488, 540], 3, 'University Circle（E 集合點）');
+link('exit-east', 'ucircle');
+link('ucircle', door('LAU', '3', [505, 540], 'LAU 3/F 入口（U-Circle）'));
+link('5-w0', door('JCT', '1&2', [512, 455], 'JCT 1-2/F（往 BOC 5/F）'));
+link(door('JCT', '1&2', [530, 516], 'JCT 1-2/F 扶手電梯'), door('LAU', '3', [530, 530], 'LAU 3/F（扶手電梯往 JCT）'));
+link(door('JCT', '8', [558, 505], 'JCT 8/F 天橋'), door('LAU', '6', [575, 540], 'LAU 6/F 天橋（往 JCT 8/F）'));
+link(door('LI', '4', [590, 515], 'LI 4/F（往 LAU）'), door('LAU', '3', [590, 545], 'LAU 3/F（往 LI）'));
+link(door('LI', 'G', [575, 518], 'LI G/F（往 LAU）'), door('LAU', 'G', [565, 550], 'LAU G/F（往 LI）'));
+outdoor('sr-bridge', [760, 585], 5, '歌和老街天橋（往學生宿舍 / CIC / CMC）');
+outdoor('sr-path', [880, 560], 2, '學生宿舍行人路');
+outdoor('cmc-path', [975, 480], 0, 'Tat Hong Avenue 入口');
+link(door('LAU', '7', [712, 566], 'LAU 7/F（往學生宿舍 / CMC / CIC）'), 'sr-bridge');
+link('sr-bridge', door('CIC', '2', [790, 615], 'CIC 2/F 入口'));
+link('sr-bridge', 'sr-path');
+link('sr-path', 'cmc-path');
+link('cmc-path', door('CMC', '1', [995, 470], 'CMC 1/F 入口'));
 
 // ---------- Places ----------
 const places = new Map();
@@ -188,17 +252,19 @@ function addPlace(display, info, ...keys) {
   placeList.push(display);
 }
 addPlace('Herman Hu Concourse (4/F)', { node: `${CONCOURSE_FLOOR}-s3` }, 'Concourse');
-const unitsAtLobby = new Map();
+const unitsAtNode = new Map();
 for (const [code, name, bld, floor, lift] of UNITS) {
-  const inside = INSIDE.has(bld);
-  const node = inside ? `${floor}-${lift}` : bld === 'TYB' ? 'exit-west' : 'exit-east';
+  const node = bld === 'YEUNG' || bld === 'BOC' ? `${floor}-${lift}`
+    : TOWERS[bld] ? `${bld}|${floor}|hall` : 'exit-west';
   addPlace(code ? `${code} - ${name}` : name, { node, unit: { code, name, bld, floor, lift } }, ...(code ? [code] : []));
-  if (inside) {
-    if (!unitsAtLobby.has(node)) unitsAtLobby.set(node, []);
-    unitsAtLobby.get(node).push(code ?? 'Computing');
+  if (node !== 'exit-west') {
+    if (!unitsAtNode.has(node)) unitsAtNode.set(node, []);
+    unitsAtNode.get(node).push(code ?? 'Computing');
   }
 }
-for (const lift of LIFTS) for (const f of lift.floors) addPlace(`${lift.id} @ ${f}/F`, { node: `${f}-${lift.id}` }, `${f}/F ${lift.id}`);
+for (const lift of YEUNG_LIFTS) for (const f of lift.floors) addPlace(`${lift.id} @ ${f}/F`, { node: `${f}-${lift.id}` });
+for (const [key, b] of Object.entries(TOWERS)) for (const fl of b.floors) addPlace(`${key} ${flName(fl)}`, { node: `${key}|${fl}|hall` });
+for (const n of nodes.values()) if (n.bld === null) addPlace(n.label, { node: n.id });
 const lookup = s => { const k = s.trim().toUpperCase(); return places.get(k) ?? aliases.get(k); };
 
 // ---------- A* ----------
@@ -242,11 +308,14 @@ function buildSteps(seq) {
     while (j < seq.length && (seq[j].via !== 'walk') === isLift) j++;
     const b = nodes.get(seq[j - 1].id);
     if (isLift) {
-      if (a.floor !== b.floor) steps.push(`乘 ${b.lift} 升降機：${a.floor}/F → ${b.floor}/F`);
+      if (a.lvl !== b.lvl) steps.push(`乘 ${b.lift} 升降機：${flName(a.fl)} → ${flName(b.fl)}`);
     } else {
-      const dx = b.x - a.x;
-      const dir = Math.abs(dx) < 6 ? '' : dx > 0 ? '向 BOC 方向' : '向紫區方向';
-      steps.push(`${dir}行到 ${b.label}`);
+      const via = [];
+      for (let k = i; k < j - 1; k++) {
+        const n = nodes.get(seq[k].id);
+        if (n.bld !== nodes.get(seq[k - 1].id).bld) via.push(n.label);
+      }
+      steps.push(`${via.length ? `經 ${via.join(' → ')}，` : ''}行到 ${b.label}`);
     }
     i = j;
   }
@@ -261,10 +330,11 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xdfe6ee);
-const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 3000);
-camera.position.set(150, 140, 200);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 4000);
+camera.position.set(330, 330, 480);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(-10, 15, 0);
+const DEFAULT_TARGET = [90, 40];
+controls.target.set(DEFAULT_TARGET[0], 30, DEFAULT_TARGET[1]);
 controls.enableDamping = true;
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 2));
@@ -272,9 +342,9 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.5);
 sun.position.set(100, 200, 80);
 scene.add(sun);
 
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), new THREE.MeshLambertMaterial({ color: 0xc8d2c0 }));
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), new THREE.MeshLambertMaterial({ color: 0xe9e2cf }));
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.6;
+ground.position.y = -0.8;
 scene.add(ground);
 
 function makeLabel(text, size, bg = 'rgba(255,255,255,0.85)') {
@@ -298,25 +368,169 @@ function makeLabel(text, size, bg = 'rgba(255,255,255,0.85)') {
   return sprite;
 }
 
+// ---------- Surroundings: heights and hills are guesses ----------
+const gauss = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) / sx) ** 2 + ((y - cy) / sy) ** 2) / 2);
+function terrainHeight(x, z) {
+  const ix = (x - 40) / PX + 440, iy = z / PX + 440;
+  const mask = THREE.MathUtils.smoothstep(380 - iy, 0, 80);
+  return mask * (45 * gauss(ix, iy, 560, 240, 170, 90) + 35 * gauss(ix, iy, 330, 150, 120, 90));
+}
+
+{
+  const [x0, z0] = toWorld(0, 0), [x1, z1] = toWorld(1300, 760);
+  const geo = new THREE.PlaneGeometry(x1 - x0, z1 - z0, 130, 76);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate((x0 + x1) / 2, 0, (z0 + z1) / 2);
+  const pos = geo.attributes.position;
+  const flat = new THREE.Color(0xe9e2cf), hill = new THREE.Color(0x86a872), c = new THREE.Color();
+  const colors = [];
+  for (let i = 0; i < pos.count; i++) {
+    const h = terrainHeight(pos.getX(i), pos.getZ(i));
+    pos.setY(i, h - 0.6);
+    c.copy(flat).lerp(hill, Math.min(1, h / 12));
+    colors.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+}
+
+function addRoad(name, pts, width, color = 0x8f969c) {
+  const pts2 = pts.map(p => new THREE.Vector2(...toWorld(...p)));
+  const samples = [pts2[0]];
+  for (let i = 1; i < pts2.length; i++) {
+    const n = Math.max(1, Math.ceil(pts2[i - 1].distanceTo(pts2[i]) / 4));
+    for (let k = 1; k <= n; k++) samples.push(pts2[i - 1].clone().lerp(pts2[i], k / n));
+  }
+  const verts = [], index = [];
+  samples.forEach((p, i) => {
+    const d = samples[Math.min(i + 1, samples.length - 1)].clone().sub(samples[Math.max(i - 1, 0)]).normalize();
+    for (const s of [1, -1]) {
+      const x = p.x - d.y * s * width / 2, z = p.y + d.x * s * width / 2;
+      verts.push(x, terrainHeight(x, z) - 0.3, z);
+    }
+    if (i) index.push(2 * i - 2, 2 * i - 1, 2 * i, 2 * i - 1, 2 * i + 1, 2 * i);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setIndex(index);
+  scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2 })));
+  if (name) {
+    const mid = samples[Math.floor(samples.length / 2)];
+    const label = makeLabel(name, 3.5, 'rgba(255,255,255,0.7)');
+    label.position.set(mid.x, terrainHeight(mid.x, mid.y) + 4, mid.y);
+    scene.add(label);
+  }
+}
+
+function footprintGeo(pts, depth) {
+  const shape = new THREE.Shape(pts.map(p => { const [x, z] = toWorld(...p); return new THREE.Vector2(x, -z); }));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+  geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+
+const ctxMat = new THREE.MeshLambertMaterial({ color: 0xd9d4ca });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x8a857c });
+function addBlock(name, pts, floors, color) {
+  const geo = footprintGeo(pts, floors * 4);
+  const world = pts.map(p => toWorld(...p));
+  const cx = world.reduce((s, p) => s + p[0], 0) / world.length;
+  const cz = world.reduce((s, p) => s + p[1], 0) / world.length;
+  const base = terrainHeight(cx, cz) - 0.6;
+  const mesh = new THREE.Mesh(geo, color ? new THREE.MeshLambertMaterial({ color }) : ctxMat);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat);
+  mesh.position.y = edges.position.y = base;
+  scene.add(mesh, edges);
+  if (name) {
+    const label = makeLabel(name, 4);
+    label.position.set(cx, base + floors * 4 + 4, cz);
+    scene.add(label);
+  }
+}
+const diamond = (cx, cy, r) => [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy]];
+function rect(cx, cy, w, d, deg) {
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [[-w, -d], [w, -d], [w, d], [-w, d]].map(([u, v]) => [cx + (u * c - v * s) / 2, cy + (u * s + v * c) / 2]);
+}
+
+for (const [name, pts, floors, color] of [
+  ['MMW', diamond(260, 515, 20), 6],
+  ['FYW', diamond(330, 515, 20), 6],
+  ['YKC', diamond(375, 515, 20), 6],
+  ['CYC', diamond(420, 515, 20), 6],
+  ['AEB', [[195, 522], [238, 522], [242, 582], [202, 588], [188, 560]], 6],
+  ['TYB', [[185, 362], [212, 368], [224, 402], [194, 404]], 7],
+  ['Festival Walk 又一城', [[190, 612], [372, 610], [372, 716], [190, 716]], 7],
+  ['FW Office Tower', [[380, 615], [430, 615], [430, 680], [380, 680]], 12],
+  ['InnoCentre', [[120, 615], [178, 620], [174, 660], [124, 656]], 6],
+  ['Tak Chee Yuen', [[475, 640], [600, 640], [600, 720], [475, 720]], 4],
+  ['Nam Shan Building', [[405, 75], [435, 75], [435, 115], [405, 115]], 12],
+  [null, [[515, 385], [570, 385], [570, 410], [515, 410]], 0.05, 0x5dade2],
+]) addBlock(name, pts, floors, color);
+[[805, 560], [860, 530], [905, 500], [950, 465], [950, 540], [915, 585], [870, 630]]
+  .forEach(([x, y], i) => addBlock(i === 3 ? 'Student Residence' : null, rect(x, y, 14, 48, -35), 18));
+
+for (const [name, pts, w, color] of [
+  ['Tat Chee Avenue 達之路', [[100, 603], [300, 600], [480, 596], [640, 590], [720, 585]], 14],
+  ['Cornwall Street 歌和老街', [[720, 585], [850, 500], [1000, 400], [1150, 330], [1290, 300]], 14],
+  ['To Yuen Street 桃源街', [[175, 603], [175, 420], [192, 330]], 9],
+  ['Tai Hang Tung Road 大坑東道', [[245, 40], [250, 200], [240, 330]], 10],
+  ['Nam Shan Chuen Road 南山邨道', [[240, 330], [330, 300], [470, 250], [480, 150], [450, 40]], 8],
+  [null, [[620, 30], [700, 120], [820, 200], [1000, 240], [1290, 250]], 18],
+  ['地下通道 → 又一城 / 九龍塘站', [[290, 570], [290, 640]], 3, 0xffffff],
+]) addRoad(name, pts, w, color);
+
+{
+  const park = makeLabel('石硤尾公園 Shek Kip Mei Park', 4, 'rgba(255,255,255,0.7)');
+  const [px, pz] = toWorld(660, 330);
+  park.position.set(px, terrainHeight(px, pz) + 6, pz);
+  scene.add(park);
+}
+
+// ---------- Indoor floors ----------
 const floorGroups = new Map();
 const pickables = [];
 const liftGeo = new THREE.BoxGeometry(3, 2.8, 3);
+const doorGeo = new THREE.BoxGeometry(4, 1, 4);
 
-for (const f of ALL_FLOORS) {
+function newFloor(bld, fl, lvl) {
   const group = new THREE.Group();
-  group.position.y = floorY(f);
-  const materials = [];
-  const slab = (w, d, x, z, color, { rotY = 0, h = 0.4, y = -0.2, opacity = 0.85 } = {}) => {
-    const m = new THREE.MeshLambertMaterial({ color, transparent: true, opacity });
+  const labels = new THREE.Group();
+  labels.visible = false;
+  group.add(labels);
+  const g = { bld, fl, lvl, group, labels, materials: [] };
+  g.mat = (color, opacity, Ctor = THREE.MeshLambertMaterial) => {
+    const m = new Ctor({ color, transparent: true, opacity });
     m.userData.base = opacity;
-    materials.push(m);
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    g.materials.push(m);
+    return m;
+  };
+  scene.add(group);
+  floorGroups.set(`${bld}|${fl}`, g);
+  return g;
+}
+
+function addLiftBox(g, x, z, place, text, highlight) {
+  const box = new THREE.Mesh(liftGeo, g.mat(0x444444, 0.9));
+  box.position.set(x, 1.4, z);
+  box.userData.place = place;
+  g.group.add(box);
+  const lbl = highlight ? makeLabel(text, 2.6, 'rgba(255,240,180,0.95)') : makeLabel(text, 1.8);
+  lbl.position.set(x, 4.5, z);
+  lbl.userData.place = place;
+  g.labels.add(lbl);
+  pickables.push(box, lbl);
+}
+
+for (let f = 1; f <= 9; f++) {
+  const g = newFloor('YEUNG', String(f), f - 1);
+  const slab = (w, d, x, z, color, { rotY = 0, h = 0.4, y = -0.2, opacity = 0.85 } = {}) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), g.mat(color, opacity));
     mesh.position.set(x, y, z);
     mesh.rotation.y = rotY;
-    group.add(mesh);
-    return mesh;
+    g.group.add(mesh);
   };
-
   if (f <= 7) {
     for (const zn of ZONES) {
       const cx = (zn.x0 + zn.x1) / 2, w = zn.x1 - zn.x0;
@@ -336,63 +550,71 @@ for (const f of ALL_FLOORS) {
       0xe8452c, { rotY: Math.atan2(-dz, dx) });
   }
   if (f === CONCOURSE_FLOOR) {
-    for (const [name, x] of [['MMW', -76], ['FYW', -44], ['YKC', -12], ['CYC', 20]]) {
-      slab(15, 15, x, 62, 0xbbbbbb, { rotY: Math.PI / 4, opacity: 0.6 });
-      const l = makeLabel(name, 2.5);
-      l.position.set(x, 3, 62);
-      group.add(l);
-    }
-    for (const [id, text] of [['exit-east', '往 JCT / LAU / LI'], ['exit-west', '往 To Yuen']]) {
-      const n = nodes.get(id);
-      slab(5, 5, n.x, n.z, 0x16a34a, { h: 1, y: 0.5, opacity: 0.9 });
-      const l = makeLabel(text, 2.5);
-      l.position.set(n.x, 4, n.z);
-      group.add(l);
-    }
     const c = makeLabel('Herman Hu Concourse', 3);
     c.position.set(-20, 6, 0);
-    group.add(c);
+    g.group.add(c);
   }
-
-  const labels = new THREE.Group();
-  labels.visible = false;
-  for (const lift of LIFTS.filter(l => l.floors.includes(f))) {
-    const place = `${lift.id} @ ${f}/F`;
-    const m = new THREE.MeshLambertMaterial({ color: 0x444444, transparent: true, opacity: 0.9 });
-    m.userData.base = 0.9;
-    materials.push(m);
-    const box = new THREE.Mesh(liftGeo, m);
-    box.position.set(lift.x, 1.4, lift.z);
-    box.userData.place = place;
-    group.add(box);
-    pickables.push(box);
-
-    const units = unitsAtLobby.get(`${f}-${lift.id}`);
-    const lbl = units
-      ? makeLabel(`${lift.id} · ${units.join(' / ')}`, 2.6, 'rgba(255,240,180,0.95)')
-      : makeLabel(lift.id, 1.8);
-    lbl.position.set(lift.x, 4.5, lift.z);
-    lbl.userData.place = place;
-    labels.add(lbl);
-    pickables.push(lbl);
+  for (const lift of YEUNG_LIFTS.filter(l => l.floors.includes(f))) {
+    const units = unitsAtNode.get(`${f}-${lift.id}`);
+    addLiftBox(g, lift.x, lift.z, `${lift.id} @ ${f}/F`, units ? `${lift.id} · ${units.join(' / ')}` : lift.id, !!units);
   }
-  group.add(labels);
-
   const fl = makeLabel(f <= 7 ? `YEUNG / BOC ${f}/F` : `BOC ${f}/F`, 3.5);
   fl.position.set(-150, 1, 0);
-  group.add(fl);
+  g.group.add(fl);
+}
 
-  scene.add(group);
-  floorGroups.set(f, { group, materials, labels });
+const towerLabels = [];
+for (const [key, b] of Object.entries(TOWERS)) {
+  const [cx, cz] = toWorld(...b.core);
+  b.floors.forEach((fl, i) => {
+    const g = newFloor(key, fl, i);
+    const geo = footprintGeo(b.footprint(fl), 0.4);
+    const slab = new THREE.Mesh(geo, g.mat(b.color, 0.85));
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), g.mat(0x555555, 0.6, THREE.LineBasicMaterial));
+    slab.position.y = edges.position.y = -0.4;
+    g.group.add(slab, edges);
+    const place = `${key} ${flName(fl)}`;
+    const units = unitsAtNode.get(`${key}|${fl}|hall`);
+    addLiftBox(g, cx, cz, place, units ? `${place} · ${units.join(' / ')}` : place, !!units);
+  });
+  const name = makeLabel(`${key} ${b.name}`, 4);
+  scene.add(name);
+  towerLabels.push({ sprite: name, x: cx, z: cz, top: b.floors.length - 1 });
+}
+
+for (const n of nodes.values()) {
+  if (!n.door) continue;
+  const g = floorGroups.get(`${n.bld}|${n.fl}`);
+  const box = new THREE.Mesh(doorGeo, g.mat(0x16a34a, 0.9));
+  box.position.set(n.x, 0.5, n.z);
+  g.group.add(box);
+  const l = makeLabel(n.label, 2.2);
+  l.position.set(n.x, 3.5, n.z);
+  g.labels.add(l);
+}
+
+const outdoorMarkers = [];
+const outdoorGeo = new THREE.CylinderGeometry(2, 2, 0.6, 16);
+const outdoorMat = new THREE.MeshLambertMaterial({ color: 0x16a34a });
+for (const n of nodes.values()) {
+  if (n.bld !== null) continue;
+  const m = new THREE.Mesh(outdoorGeo, outdoorMat);
+  const l = makeLabel(n.label, 2.4);
+  scene.add(m, l);
+  outdoorMarkers.push({ n, m, l });
 }
 
 const shaftMat = new THREE.MeshLambertMaterial({ color: 0x555555, transparent: true, opacity: 0.35 });
-for (const lift of LIFTS) {
-  const lo = floorY(lift.floors[0]), hi = floorY(lift.floors.at(-1)) + 3;
-  const shaft = new THREE.Mesh(new THREE.BoxGeometry(1.5, hi - lo, 1.5), shaftMat);
-  shaft.position.set(lift.x, (lo + hi) / 2, lift.z);
-  scene.add(shaft);
-}
+const shafts = [
+  ...YEUNG_LIFTS.map(l => ({ x: l.x, z: l.z, lo: l.floors[0] - 1, hi: l.floors.at(-1) - 1 })),
+  ...Object.values(TOWERS).map(b => { const [x, z] = toWorld(...b.core); return { x, z, lo: 0, hi: b.floors.length - 1 }; }),
+].map(s => {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1, 1.5), shaftMat);
+  mesh.position.set(s.x, 0, s.z);
+  mesh.userData = s;
+  scene.add(mesh);
+  return mesh;
+});
 
 // ---------- Route rendering ----------
 const pathMat = new THREE.MeshBasicMaterial({ color: 0xff3b30, depthTest: false, transparent: true, opacity: 0.9 });
@@ -406,14 +628,15 @@ const startPin = new THREE.Mesh(pinGeo, new THREE.MeshBasicMaterial({ color: 0x1
 const endPin = new THREE.Mesh(pinGeo, new THREE.MeshBasicMaterial({ color: 0xc8102e, depthTest: false }));
 for (const p of [startPin, endPin]) { p.renderOrder = 1000; p.visible = false; scene.add(p); }
 
-let pathMesh = null, curve = null;
+let pathMesh = null, curve = null, lastSeq = null;
 function drawPath(seq) {
+  lastSeq = seq;
   if (pathMesh) { scene.remove(pathMesh); pathMesh.geometry.dispose(); }
   curve = new THREE.CurvePath();
   let prev = null;
   for (const s of seq) {
     const n = nodes.get(s.id);
-    const p = new THREE.Vector3(n.x, n.y + 1.2, n.z);
+    const p = new THREE.Vector3(n.x, dispY(n.lvl) + 1.2, n.z);
     if (prev && !p.equals(prev)) curve.add(new THREE.LineCurve3(prev, p));
     prev = p;
   }
@@ -421,14 +644,14 @@ function drawPath(seq) {
   pathMesh.renderOrder = 999;
   scene.add(pathMesh);
   const a = nodes.get(seq[0].id), b = nodes.get(seq.at(-1).id);
-  startPin.position.set(a.x, a.y + 5, a.z);
-  endPin.position.set(b.x, b.y + 5, b.z);
+  startPin.position.set(a.x, dispY(a.lvl) + 5, a.z);
+  endPin.position.set(b.x, dispY(b.lvl) + 5, b.z);
   startPin.visible = endPin.visible = marker.visible = true;
 }
 
 // ---------- UI ----------
 const $ = id => document.getElementById(id);
-const fromInput = $('from'), toInput = $('to'), msg = $('msg'), stepsEl = $('steps');
+const fromInput = $('from'), toInput = $('to'), msg = $('msg'), stepsEl = $('steps'), bldSelect = $('bld');
 
 for (const name of placeList) {
   const opt = document.createElement('option');
@@ -451,11 +674,11 @@ function route() {
 
   const steps = buildSteps(result.seq);
   const u = to.unit;
-  if (u && !INSIDE.has(u.bld)) {
-    steps.push(`出 YEUNG 後前往 ${BUILDINGS[u.bld]} ${u.floor}/F（其他大樓路段未建模）`);
-    showMessage(`${u.name} 喺 ${u.bld} ${u.floor}/F。PDF 建議經 4/F Herman Hu Concourse 前往其他大樓。`);
+  if (u && u.bld === 'TYB') {
+    steps.push(`出去 To Yuen Building 後上 ${u.floor}/F（大樓內部未建模）`);
+    showMessage(`${u.name}：To Yuen Building ${u.floor}/F`);
   } else if (u) {
-    showMessage(`${u.name}：${u.bld} ${u.floor}/F，近 ${u.lift} 升降機`);
+    showMessage(`${u.name}：${BUILDING_NAMES[u.bld]} ${u.floor}/F${u.lift ? `，近 ${u.lift} 升降機` : ''}`);
   } else {
     showMessage('');
   }
@@ -465,30 +688,76 @@ function route() {
     stepsEl.appendChild(li);
   }
   drawPath(result.seq);
-  setFocus(nodes.get(to.node).floor);
+  const dest = nodes.get(to.node);
+  setFocus(dest.bld, dest.fl);
 }
 
 $('go').addEventListener('click', route);
 for (const el of [fromInput, toInput]) el.addEventListener('keydown', e => { if (e.key === 'Enter') route(); });
 
-const floorButtons = new Map();
-function setFocus(f) {
-  for (const [fl, fg] of floorGroups) {
-    fg.group.visible = f === null || fl <= f;
-    const dim = f !== null && fl < f;
-    for (const m of fg.materials) m.opacity = m.userData.base * (dim ? 0.15 : 1);
-    fg.labels.visible = fl === f;
+const BLD_FLOORS = { YEUNG: nums(1, 9), ...Object.fromEntries(Object.entries(TOWERS).map(([k, b]) => [k, b.floors])) };
+const BLD_CENTER = { YEUNG: [-20, 0], ...Object.fromEntries(Object.entries(TOWERS).map(([k, b]) => [k, toWorld(...b.core)])) };
+for (const [value, text] of [['', '全部'], ['YEUNG', 'YEUNG / BOC'], ...Object.entries(TOWERS).map(([k, b]) => [k, `${k} - ${b.name}`])]) {
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = text;
+  bldSelect.appendChild(opt);
+}
+bldSelect.addEventListener('change', () => setFocus(bldSelect.value || null, null));
+
+let focus = { bld: null, fl: null };
+function renderFloorButtons() {
+  const box = $('floors');
+  box.replaceChildren();
+  if (!focus.bld) return;
+  for (const fl of [null, ...BLD_FLOORS[focus.bld]]) {
+    const btn = document.createElement('button');
+    btn.textContent = fl === null ? '全部' : flName(fl);
+    btn.classList.toggle('active', fl === focus.fl);
+    btn.addEventListener('click', () => setFocus(focus.bld, fl));
+    box.appendChild(btn);
   }
-  for (const [key, btn] of floorButtons) btn.classList.toggle('active', key === f);
-  controls.target.set(-10, f === null ? 15 : floorY(f), 0);
 }
-for (const f of [null, ...ALL_FLOORS]) {
-  const btn = document.createElement('button');
-  btn.textContent = f === null ? '全部' : `${f}/F`;
-  btn.addEventListener('click', () => setFocus(f));
-  $('floors').appendChild(btn);
-  floorButtons.set(f, btn);
+
+function setFocus(bld, fl) {
+  focus = { bld, fl };
+  const lvl = bld && fl !== null ? BLD_FLOORS[bld].indexOf(fl) : null;
+  for (const g of floorGroups.values()) {
+    let visible = true, factor = 1, showLabels = false;
+    if (bld && g.bld !== bld) factor = 0.25;
+    else if (bld && lvl !== null) {
+      visible = g.lvl <= lvl;
+      if (g.lvl < lvl) factor = 0.15;
+      showLabels = g.lvl === lvl;
+    }
+    g.group.visible = visible;
+    for (const m of g.materials) m.opacity = m.userData.base * factor;
+    g.labels.visible = showLabels;
+  }
+  bldSelect.value = bld ?? '';
+  renderFloorButtons();
+  const [cx, cz] = bld ? BLD_CENTER[bld] : DEFAULT_TARGET;
+  const target = new THREE.Vector3(cx, dispY(lvl ?? 3), cz);
+  camera.position.add(target.clone().sub(controls.target));
+  controls.target.copy(target);
 }
+
+function layout() {
+  for (const g of floorGroups.values()) g.group.position.y = dispY(g.lvl);
+  for (const s of shafts) {
+    const lo = dispY(s.userData.lo), hi = dispY(s.userData.hi) + 3;
+    s.scale.y = hi - lo;
+    s.position.y = (lo + hi) / 2;
+  }
+  for (const t of towerLabels) t.sprite.position.set(t.x, dispY(t.top) + 8, t.z);
+  for (const { n, m, l } of outdoorMarkers) {
+    m.position.set(n.x, dispY(n.lvl), n.z);
+    l.position.set(n.x, dispY(n.lvl) + 3.5, n.z);
+  }
+  if (lastSeq) drawPath(lastSeq);
+  setFocus(focus.bld, focus.fl);
+}
+$('gap').addEventListener('input', e => { floorGap = Number(e.target.value); layout(); });
 
 let pickTarget = toInput;
 fromInput.addEventListener('focus', () => { pickTarget = fromInput; });
@@ -525,9 +794,9 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
 });
 
-setFocus(null);
+layout();
 fromInput.value = 'Herman Hu Concourse (4/F)';
-toInput.value = 'CS - Department of Computer Science';
+toInput.value = 'CB - College of Business';
 route();
 </script>
 </body>
